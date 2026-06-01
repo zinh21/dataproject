@@ -1,28 +1,15 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
+import warnings
+warnings.filterwarnings('ignore')
 
-# ─────────────────────────────────────────
-# matplotlib 안전 임포트
-# ─────────────────────────────────────────
-try:
-    import matplotlib
-    matplotlib.use('Agg')  # ← 반드시 pyplot보다 먼저!
-    import matplotlib.pyplot as plt
-    import matplotlib.font_manager as fm
-    MATPLOTLIB_OK = True
-except Exception as e:
-    MATPLOTLIB_OK = False
-    st.error(f"matplotlib 로드 실패: {e}")
-
+# scipy 안전 임포트
 try:
     from scipy import stats
     SCIPY_OK = True
-except Exception as e:
+except Exception:
     SCIPY_OK = False
-
-import warnings
-warnings.filterwarnings('ignore')
 
 # ─────────────────────────────────────────
 # 페이지 설정
@@ -32,24 +19,6 @@ st.set_page_config(
     page_icon="🌡️",
     layout="wide"
 )
-
-# ─────────────────────────────────────────
-# 한글 폰트 설정
-# ─────────────────────────────────────────
-if MATPLOTLIB_OK:
-    plt.rcParams['axes.unicode_minus'] = False
-    try:
-        font_list = fm.findSystemFonts(fontpaths=None, fontext='ttf')
-        korean_fonts = [f for f in font_list if any(
-            k in f.lower() for k in ['nanum', 'malgun', 'gothic', 'gulim', 'dotum']
-        )]
-        if korean_fonts:
-            font_prop = fm.FontProperties(fname=korean_fonts[0])
-            plt.rcParams['font.family'] = font_prop.get_name()
-        else:
-            plt.rcParams['font.family'] = 'DejaVu Sans'
-    except Exception:
-        plt.rcParams['font.family'] = 'DejaVu Sans'
 
 # ─────────────────────────────────────────
 # 데이터 로드
@@ -72,7 +41,7 @@ def load_data():
     df['날짜'] = pd.to_datetime(df['날짜'], errors='coerce')
     df = df.dropna(subset=['날짜'])
     df['연도'] = df['날짜'].dt.year
-    df['월'] = df['날짜'].dt.month
+    df['월']   = df['날짜'].dt.month
     for col in ['평균기온', '최저기온', '최고기온']:
         df[col] = pd.to_numeric(df[col], errors='coerce')
     df = df.dropna(subset=['평균기온'])
@@ -88,6 +57,42 @@ def get_yearly(df):
     return yearly
 
 # ─────────────────────────────────────────
+# 기온 → 색상 함수 (matplotlib 없이!)
+# ─────────────────────────────────────────
+def temp_to_color(val, vmin, vmax):
+    """파란색(낮은 기온) ~ 빨간색(높은 기온)"""
+    if pd.isna(val):
+        return 'background-color: white'
+    ratio = (val - vmin) / (vmax - vmin) if vmax != vmin else 0.5
+    ratio = max(0.0, min(1.0, ratio))
+    # 파랑 → 흰색 → 빨강
+    if ratio < 0.5:
+        r = int(255 * (ratio * 2))
+        g = int(255 * (ratio * 2))
+        b = 255
+    else:
+        r = 255
+        g = int(255 * (1 - (ratio - 0.5) * 2))
+        b = int(255 * (1 - (ratio - 0.5) * 2))
+    return f'background-color: rgb({r},{g},{b})'
+
+def color_temp_column(series):
+    vmin = series.min()
+    vmax = series.max()
+    return [temp_to_color(v, vmin, vmax) for v in series]
+
+# ─────────────────────────────────────────
+# 차트: plotly 사용 (matplotlib 대체!)
+# ─────────────────────────────────────────
+try:
+    import plotly.graph_objects as go
+    import plotly.express as px
+    from plotly.subplots import make_subplots
+    PLOTLY_OK = True
+except Exception:
+    PLOTLY_OK = False
+
+# ─────────────────────────────────────────
 # UI 시작
 # ─────────────────────────────────────────
 st.title("🌡️ 서울 기온 변화 분석 (1907~2026)")
@@ -95,7 +100,7 @@ st.markdown("#### 1970년대 전후로 기온이 급격히 상승했는지 확�
 st.markdown("---")
 
 try:
-    df = load_data()
+    df     = load_data()
     yearly = get_yearly(df)
 
     # ── 사이드바 ──────────────────────────
@@ -106,7 +111,7 @@ try:
         value=1970, step=1
     )
     show_trend = st.sidebar.checkbox("추세선 표시", value=True)
-    show_ma = st.sidebar.checkbox("10년 이동평균선 표시", value=True)
+    show_ma    = st.sidebar.checkbox("10년 이동평균선 표시", value=True)
 
     # ── 핵심 지표 ─────────────────────────
     before = yearly[yearly['연도'] < split_year]['평균기온'].mean()
@@ -125,78 +130,104 @@ try:
     # ── 탭 구성 ───────────────────────────
     tab1, tab2, tab3, tab4 = st.tabs([
         "📈 연도별 기온 변화",
-        "📊 전후 비교 박스플롯",
+        "📊 전후 비교 분포",
         "🔥 10년 단위 평균",
         "📋 통계 요약"
     ])
 
     # ══════════════════════════════════════
-    # TAB 1: 연도별 기온 변화
+    # TAB 1: 연도별 기온 변화 (Plotly)
     # ══════════════════════════════════════
     with tab1:
         st.subheader("📈 연도별 평균기온 변화")
 
-        if not MATPLOTLIB_OK:
-            st.error("matplotlib를 불러올 수 없습니다.")
+        if not PLOTLY_OK:
+            st.error("plotly가 설치되지 않았습니다. requirements.txt를 확인하세요.")
         else:
-            fig, ax = plt.subplots(figsize=(14, 6))
+            fig = go.Figure()
 
             before_df = yearly[yearly['연도'] < split_year]
             after_df  = yearly[yearly['연도'] >= split_year]
 
-            ax.plot(before_df['연도'], before_df['평균기온'],
-                    color='steelblue', linewidth=1.2,
-                    alpha=0.7, label=f'{split_year}년 이전')
-            ax.plot(after_df['연도'], after_df['평균기온'],
-                    color='tomato', linewidth=1.2,
-                    alpha=0.7, label=f'{split_year}년 이후')
+            # 이전 구간
+            fig.add_trace(go.Scatter(
+                x=before_df['연도'], y=before_df['평균기온'],
+                mode='lines', name=f'{split_year}년 이전',
+                line=dict(color='steelblue', width=1.5),
+                opacity=0.8
+            ))
 
+            # 이후 구간
+            fig.add_trace(go.Scatter(
+                x=after_df['연도'], y=after_df['평균기온'],
+                mode='lines', name=f'{split_year}년 이후',
+                line=dict(color='tomato', width=1.5),
+                opacity=0.8
+            ))
+
+            # 10년 이동평균
             if show_ma:
                 yearly_sorted = yearly.sort_values('연도')
                 ma = yearly_sorted['평균기온'].rolling(window=10, center=True).mean()
-                ax.plot(yearly_sorted['연도'], ma,
-                        color='black', linewidth=2.5,
-                        linestyle='--', label='10년 이동평균')
+                fig.add_trace(go.Scatter(
+                    x=yearly_sorted['연도'], y=ma,
+                    mode='lines', name='10년 이동평균',
+                    line=dict(color='black', width=2.5, dash='dash')
+                ))
 
+            # 추세선
             if show_trend and SCIPY_OK:
-                x = yearly['연도'].values
-                y = yearly['평균기온'].values
-                mask = ~np.isnan(y)
-                slope, intercept, r, p, _ = stats.linregress(x[mask], y[mask])
-                trend = slope * x + intercept
-                ax.plot(x, trend, color='darkgreen',
-                        linewidth=2, linestyle=':',
-                        label=f'추세선 (기울기={slope*10:.3f}°C/10년)')
+                x_vals = yearly['연도'].values
+                y_vals = yearly['평균기온'].values
+                mask   = ~np.isnan(y_vals)
+                slope, intercept, r, p, _ = stats.linregress(
+                    x_vals[mask], y_vals[mask]
+                )
+                trend = slope * x_vals + intercept
+                fig.add_trace(go.Scatter(
+                    x=x_vals, y=trend,
+                    mode='lines', name=f'추세선 ({slope*10:.3f}°C/10년)',
+                    line=dict(color='darkgreen', width=2, dash='dot')
+                ))
 
-            ax.axvline(x=split_year, color='orange',
-                       linewidth=2, linestyle='--',
-                       label=f'기준: {split_year}년')
-            ax.axhline(y=before, color='steelblue',
-                       linewidth=1, linestyle=':', alpha=0.5)
-            ax.axhline(y=after, color='tomato',
-                       linewidth=1, linestyle=':', alpha=0.5)
+            # 기준선
+            fig.add_vline(
+                x=split_year, line_color='orange',
+                line_dash='dash', line_width=2,
+                annotation_text=f"기준: {split_year}년",
+                annotation_position="top right"
+            )
+            fig.add_hline(
+                y=before, line_color='steelblue',
+                line_dash='dot', line_width=1,
+                annotation_text=f"이전 평균: {before:.2f}°C",
+                annotation_position="left"
+            )
+            fig.add_hline(
+                y=after, line_color='tomato',
+                line_dash='dot', line_width=1,
+                annotation_text=f"이후 평균: {after:.2f}°C",
+                annotation_position="right"
+            )
 
-            ax.fill_between(before_df['연도'], before_df['평균기온'],
-                            before, alpha=0.08, color='steelblue')
-            ax.fill_between(after_df['연도'], after_df['평균기온'],
-                            after, alpha=0.08, color='tomato')
-
-            ax.set_xlabel('연도', fontsize=12)
-            ax.set_ylabel('평균기온 (degC)', fontsize=12)
-            ax.set_title('서울 연도별 평균기온 변화', fontsize=15, fontweight='bold')
-            ax.legend(fontsize=10)
-            ax.grid(True, alpha=0.3)
-            plt.tight_layout()
-            st.pyplot(fig)
-            plt.close()
+            fig.update_layout(
+                title='서울 연도별 평균기온 변화',
+                xaxis_title='연도',
+                yaxis_title='평균기온 (°C)',
+                hovermode='x unified',
+                height=500,
+                legend=dict(orientation='h', yanchor='bottom', y=1.02)
+            )
+            st.plotly_chart(fig, use_container_width=True)
 
         st.info(f"""
-        💡 **분석 결과**: {split_year}년을 기준으로 이전 평균 **{before:.2f}°C** →
-        이후 평균 **{after:.2f}°C** 로 **{diff:.2f}°C 상승**하였습니다.
+        💡 **분석 결과**: {split_year}년을 기준으로
+        이전 평균 **{before:.2f}°C** → 이후 평균 **{after:.2f}°C** 로
+        **{diff:.2f}°C 상승**하였습니다.
         """)
 
     # ══════════════════════════════════════
-    # TAB 2: 박스플롯
+    # TAB 2: 분포 비교 (Plotly)
     # ══════════════════════════════════════
     with tab2:
         st.subheader("📊 기준 연도 전후 기온 분포 비교")
@@ -204,111 +235,123 @@ try:
         before_vals = df[df['연도'] < split_year]['평균기온'].dropna()
         after_vals  = df[df['연도'] >= split_year]['평균기온'].dropna()
 
-        if not MATPLOTLIB_OK:
-            st.error("matplotlib를 불러올 수 없습니다.")
+        if not PLOTLY_OK:
+            st.error("plotly가 설치되지 않았습니다.")
         else:
-            fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+            col_a, col_b = st.columns(2)
 
-            bp = axes[0].boxplot(
-                [before_vals, after_vals],
-                labels=[f'{split_year}년 이전', f'{split_year}년 이후'],
-                patch_artist=True,
-                notch=True
-            )
-            bp['boxes'][0].set_facecolor('steelblue')
-            bp['boxes'][0].set_alpha(0.6)
-            bp['boxes'][1].set_facecolor('tomato')
-            bp['boxes'][1].set_alpha(0.6)
-            axes[0].set_ylabel('평균기온 (degC)', fontsize=12)
-            axes[0].set_title('기온 분포 비교 (박스플롯)', fontsize=13, fontweight='bold')
-            axes[0].grid(True, alpha=0.3)
+            # 박스플롯
+            with col_a:
+                fig_box = go.Figure()
+                fig_box.add_trace(go.Box(
+                    y=before_vals, name=f'{split_year}년 이전',
+                    marker_color='steelblue', boxmean=True, notched=True
+                ))
+                fig_box.add_trace(go.Box(
+                    y=after_vals, name=f'{split_year}년 이후',
+                    marker_color='tomato', boxmean=True, notched=True
+                ))
+                fig_box.update_layout(
+                    title='기온 분포 비교 (박스플롯)',
+                    yaxis_title='평균기온 (°C)',
+                    height=450
+                )
+                st.plotly_chart(fig_box, use_container_width=True)
 
-            axes[1].hist(before_vals, bins=50, alpha=0.6,
-                         color='steelblue', label=f'{split_year}년 이전', density=True)
-            axes[1].hist(after_vals, bins=50, alpha=0.6,
-                         color='tomato', label=f'{split_year}년 이후', density=True)
-            axes[1].axvline(before_vals.mean(), color='steelblue',
-                            linewidth=2, linestyle='--',
-                            label=f'이전 평균: {before_vals.mean():.1f}')
-            axes[1].axvline(after_vals.mean(), color='tomato',
-                            linewidth=2, linestyle='--',
-                            label=f'이후 평균: {after_vals.mean():.1f}')
-            axes[1].set_xlabel('평균기온 (degC)', fontsize=12)
-            axes[1].set_ylabel('밀도', fontsize=12)
-            axes[1].set_title('기온 분포 비교 (히스토그램)', fontsize=13, fontweight='bold')
-            axes[1].legend(fontsize=10)
-            axes[1].grid(True, alpha=0.3)
+            # 히스토그램
+            with col_b:
+                fig_hist = go.Figure()
+                fig_hist.add_trace(go.Histogram(
+                    x=before_vals, name=f'{split_year}년 이전',
+                    marker_color='steelblue', opacity=0.6,
+                    nbinsx=60, histnorm='probability density'
+                ))
+                fig_hist.add_trace(go.Histogram(
+                    x=after_vals, name=f'{split_year}년 이후',
+                    marker_color='tomato', opacity=0.6,
+                    nbinsx=60, histnorm='probability density'
+                ))
+                fig_hist.add_vline(
+                    x=float(before_vals.mean()),
+                    line_color='steelblue', line_dash='dash', line_width=2,
+                    annotation_text=f"이전 평균: {before_vals.mean():.1f}°C"
+                )
+                fig_hist.add_vline(
+                    x=float(after_vals.mean()),
+                    line_color='tomato', line_dash='dash', line_width=2,
+                    annotation_text=f"이후 평균: {after_vals.mean():.1f}°C"
+                )
+                fig_hist.update_layout(
+                    title='기온 분포 비교 (히스토그램)',
+                    xaxis_title='평균기온 (°C)',
+                    yaxis_title='밀도',
+                    barmode='overlay',
+                    height=450
+                )
+                st.plotly_chart(fig_hist, use_container_width=True)
 
-            plt.tight_layout()
-            st.pyplot(fig)
-            plt.close()
-
+        # t-검정
         if SCIPY_OK:
             t_stat, p_val = stats.ttest_ind(before_vals, after_vals)
-            if p_val < 0.001:
-                p_str = "p < 0.001 (매우 유의미한 차이! ✅)"
-            else:
-                p_str = f"p = {p_val:.4f}"
+            p_str = "p < 0.001 ✅" if p_val < 0.001 else f"p = {p_val:.4f}"
             st.success(f"""
             📊 **통계 검정 (독립 t-검정)**
             - t-통계량: **{t_stat:.4f}**
             - p-값: **{p_str}**
-            - → 두 기간의 기온 차이는 **통계적으로 유의미**합니다.
+            - → 두 기간의 기온 차이는 **통계적으로 매우 유의미**합니다.
             """)
 
     # ══════════════════════════════════════
-    # TAB 3: 10년 단위 평균
+    # TAB 3: 10년 단위 평균 (Plotly)
     # ══════════════════════════════════════
     with tab3:
         st.subheader("🔥 10년 단위 평균기온")
 
         yearly2 = yearly.copy()
-        yearly2['decade'] = (yearly2['연도'] // 10 * 10).astype(str) + '년대'
-        decade_avg = yearly2.groupby('decade')['평균기온'].mean().reset_index()
-        decade_avg = decade_avg.sort_values('decade')
+        yearly2['decade']     = (yearly2['연도'] // 10 * 10)
+        yearly2['decade_str'] = yearly2['decade'].astype(str) + '년대'
+        decade_avg = (
+            yearly2.groupby(['decade', 'decade_str'])['평균기온']
+            .mean().reset_index().sort_values('decade')
+        )
 
-        if not MATPLOTLIB_OK:
-            st.error("matplotlib를 불러올 수 없습니다.")
+        if not PLOTLY_OK:
+            st.error("plotly가 설치되지 않았습니다.")
         else:
-            from matplotlib.patches import Patch
-
-            fig, ax = plt.subplots(figsize=(14, 6))
-            colors = ['tomato' if int(d[:4]) >= split_year else 'steelblue'
-                      for d in decade_avg['decade']]
-
-            bars = ax.bar(decade_avg['decade'], decade_avg['평균기온'],
-                          color=colors, alpha=0.8, edgecolor='white', linewidth=1.2)
-
-            for bar, val in zip(bars, decade_avg['평균기온']):
-                ax.text(bar.get_x() + bar.get_width()/2,
-                        bar.get_height() + 0.05,
-                        f'{val:.1f}',
-                        ha='center', va='bottom', fontsize=9, fontweight='bold')
-
-            legend_elements = [
-                Patch(facecolor='steelblue', alpha=0.8, label=f'{split_year}년 이전'),
-                Patch(facecolor='tomato', alpha=0.8, label=f'{split_year}년 이후'),
-                plt.Line2D([0], [0], color='steelblue', linestyle='--',
-                           label=f'이전 평균: {before:.2f}'),
-                plt.Line2D([0], [0], color='tomato', linestyle='--',
-                           label=f'이후 평균: {after:.2f}')
+            colors = [
+                'tomato' if d >= split_year else 'steelblue'
+                for d in decade_avg['decade']
             ]
 
-            ax.axhline(y=before, color='steelblue', linewidth=1.5,
-                       linestyle='--', alpha=0.7)
-            ax.axhline(y=after, color='tomato', linewidth=1.5,
-                       linestyle='--', alpha=0.7)
-
-            ax.set_xlabel('연대', fontsize=12)
-            ax.set_ylabel('평균기온 (degC)', fontsize=12)
-            ax.set_title('10년 단위 평균기온', fontsize=15, fontweight='bold')
-            ax.legend(handles=legend_elements, fontsize=10)
-            ax.tick_params(axis='x', rotation=45)
-            ax.grid(True, alpha=0.3, axis='y')
-
-            plt.tight_layout()
-            st.pyplot(fig)
-            plt.close()
+            fig_bar = go.Figure()
+            fig_bar.add_trace(go.Bar(
+                x=decade_avg['decade_str'],
+                y=decade_avg['평균기온'],
+                marker_color=colors,
+                opacity=0.85,
+                text=[f"{v:.1f}°C" for v in decade_avg['평균기온']],
+                textposition='outside'
+            ))
+            fig_bar.add_hline(
+                y=before, line_color='steelblue',
+                line_dash='dash', line_width=1.5,
+                annotation_text=f"이전 평균 {before:.2f}°C",
+                annotation_position="left"
+            )
+            fig_bar.add_hline(
+                y=after, line_color='tomato',
+                line_dash='dash', line_width=1.5,
+                annotation_text=f"이후 평균 {after:.2f}°C",
+                annotation_position="right"
+            )
+            fig_bar.update_layout(
+                title='10년 단위 평균기온',
+                xaxis_title='연대',
+                yaxis_title='평균기온 (°C)',
+                height=500,
+                xaxis_tickangle=-45
+            )
+            st.plotly_chart(fig_bar, use_container_width=True)
 
     # ══════════════════════════════════════
     # TAB 4: 통계 요약
@@ -321,14 +364,14 @@ try:
 
         def summary(d, label):
             return {
-                '기간': label,
-                '데이터 수': f"{len(d):,}일",
-                '평균기온 평균': f"{d['평균기온'].mean():.2f}°C",
-                '평균기온 최솟값': f"{d['평균기온'].min():.1f}°C",
-                '평균기온 최댓값': f"{d['평균기온'].max():.1f}°C",
-                '평균기온 표준편차': f"{d['평균기온'].std():.2f}°C",
-                '최고기온 평균': f"{d['최고기온'].mean():.2f}°C",
-                '최저기온 평균': f"{d['최저기온'].mean():.2f}°C",
+                '기간':           label,
+                '데이터 수':      f"{len(d):,}일",
+                '평균기온 평균':  f"{d['평균기온'].mean():.2f}°C",
+                '최솟값':         f"{d['평균기온'].min():.1f}°C",
+                '최댓값':         f"{d['평균기온'].max():.1f}°C",
+                '표준편차':       f"{d['평균기온'].std():.2f}°C",
+                '최고기온 평균':  f"{d['최고기온'].mean():.2f}°C",
+                '최저기온 평균':  f"{d['최저기온'].mean():.2f}°C",
             }
 
         stats_df = pd.DataFrame([
@@ -339,15 +382,17 @@ try:
 
         st.markdown("---")
         st.subheader("📅 연도별 데이터 테이블")
-        st.dataframe(
-            yearly.rename(columns={
-                '평균기온': '평균기온(°C)',
-                '최저기온': '최저기온(°C)',
-                '최고기온': '최고기온(°C)'
-            }).style.background_gradient(subset=['평균기온(°C)'], cmap='RdYlBu_r'),
-            use_container_width=True,
-            height=400
+
+        # ✅ background_gradient 제거 → 직접 색상 함수 사용
+        display_df = yearly.rename(columns={
+            '평균기온': '평균기온(°C)',
+            '최저기온': '최저기온(°C)',
+            '최고기온': '최고기온(°C)'
+        })
+        styled = display_df.style.apply(
+            color_temp_column, subset=['평균기온(°C)']
         )
+        st.dataframe(styled, use_container_width=True, height=400)
 
 except FileNotFoundError:
     st.error("⚠️ CSV 파일을 찾을 수 없습니다. 같은 폴더에 파일을 넣어주세요!")
